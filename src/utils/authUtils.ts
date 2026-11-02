@@ -268,6 +268,8 @@ export async function authenticateAdmin(
         friendlyMsg = 'Email sau parolă incorectă în Supabase Auth. Verificați dacă utilizatorul există în Supabase Dashboard → Authentication → Users.';
       } else if (error?.message?.includes('Invalid path specified in request URL')) {
         friendlyMsg = 'URL-ul Supabase configurat conținea o cale invalidă (ex: /rest/v1 sau bară la final). Adresa a fost normalizată automat; reîncercați autentificarea acum.';
+      } else if (error?.message?.includes('Invalid API key') || error?.message?.includes('apikey')) {
+        friendlyMsg = 'Cheia publică Supabase (VITE_SUPABASE_ANON_KEY) este incorectă, incompletă sau din alt proiect. Copiați din nou cheia "anon / public" din Supabase Dashboard → Settings → API.';
       }
 
       return {

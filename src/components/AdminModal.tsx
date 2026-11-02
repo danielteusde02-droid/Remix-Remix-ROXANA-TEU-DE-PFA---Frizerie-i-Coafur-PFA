@@ -60,6 +60,7 @@ export const AdminModal: React.FC<AdminModalProps> = ({
   const [passwordInput, setPasswordInput] = useState('');
   const [authError, setAuthError] = useState('');
   const [showPassword, setShowPassword] = useState(false);
+  const [showAnonKey, setShowAnonKey] = useState(false);
   const [showQuickSupabaseConfig, setShowQuickSupabaseConfig] = useState(false);
   const [quickSaveMessage, setQuickSaveMessage] = useState('');
   const [copiedBootstrapSql, setCopiedBootstrapSql] = useState(false);
@@ -898,14 +899,33 @@ export const AdminModal: React.FC<AdminModalProps> = ({
                     />
                   </div>
                   <div>
-                    <label className="text-[10px] text-zinc-400 block mb-1">VITE_SUPABASE_ANON_KEY (sau sb_publishable_...)</label>
-                    <input
-                      type="password"
-                      value={supabaseKey}
-                      onChange={e => setSupabaseKey(e.target.value)}
-                      placeholder="eyJhbGciOi... sau sb_publishable_..."
-                      className="w-full px-2.5 py-1.5 rounded-lg bg-zinc-950 border border-zinc-700 text-white text-xs font-mono focus:border-[#d4af37] focus:outline-none"
-                    />
+                    <div className="flex items-center justify-between mb-1">
+                      <label className="text-[10px] text-zinc-400">
+                        VITE_SUPABASE_ANON_KEY <span className="text-zinc-500">(cheia publică `anon`, nu cea secretă!)</span>
+                      </label>
+                      <button
+                        type="button"
+                        onClick={() => setShowAnonKey(!showAnonKey)}
+                        className="text-[10px] text-zinc-400 hover:text-[#d4af37] flex items-center gap-1 cursor-pointer"
+                      >
+                        {showAnonKey ? <EyeOff className="w-3 h-3" /> : <Eye className="w-3 h-3" />}
+                        <span>{showAnonKey ? 'Ascunde' : 'Arată cheia'}</span>
+                      </button>
+                    </div>
+                    <div className="relative">
+                      <input
+                        type={showAnonKey ? 'text' : 'password'}
+                        value={supabaseKey}
+                        onChange={e => setSupabaseKey(e.target.value.trim())}
+                        placeholder="eyJhbGciOi... sau sb_publishable_..."
+                        className="w-full px-2.5 py-1.5 rounded-lg bg-zinc-950 border border-zinc-700 text-white text-xs font-mono focus:border-[#d4af37] focus:outline-none"
+                      />
+                    </div>
+                    {supabaseKey && (
+                      <p className="text-[9px] text-zinc-500 mt-0.5">
+                        Lungime cheie: {supabaseKey.length} caractere (cheia anon standard are ~150-250 caractere și începe de obicei cu `eyJ...` sau `sb_publishable_`)
+                      </p>
+                    )}
                   </div>
                   <div>
                     <label className="text-[10px] text-zinc-400 block mb-1">
@@ -954,15 +974,56 @@ export const AdminModal: React.FC<AdminModalProps> = ({
                   <div className="pt-2 border-t border-red-900/60 text-[11px] text-zinc-300 space-y-1.5">
                     <p className="text-amber-300 font-medium">Soluție rapidă în Supabase SQL Editor:</p>
                     <p className="text-zinc-400">
-                      Rulați următoarea comandă în SQL Editor pentru a confirma emailul și a acorda rolul de administrator contului:
+                      Rulați următoarea comandă în SQL Editor pentru a crea automat tabelul și a confirma administratorul:
                     </p>
                     <pre className="p-2 rounded bg-black/60 font-mono text-[10px] text-amber-200/90 whitespace-pre-wrap select-all">
-{`UPDATE auth.users SET email_confirmed_at = now() WHERE email = '${emailInput.trim() || 'emailul_tau@domeniu.ro'}';\nINSERT INTO public.admin_users (user_id, email, role, active)\nSELECT id, email, 'super_admin', TRUE FROM auth.users WHERE email = '${emailInput.trim() || 'emailul_tau@domeniu.ro'}'\nON CONFLICT (user_id) DO UPDATE SET active = TRUE, role = 'super_admin';`}
+{`CREATE EXTENSION IF NOT EXISTS pgcrypto;
+
+CREATE TABLE IF NOT EXISTS public.admin_users (
+    user_id UUID PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,
+    email VARCHAR(150) NOT NULL UNIQUE,
+    role VARCHAR(50) NOT NULL DEFAULT 'super_admin' CHECK (role IN ('admin', 'super_admin')),
+    active BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now()) NOT NULL,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now()) NOT NULL
+);
+
+ALTER TABLE public.admin_users ENABLE ROW LEVEL SECURITY;
+
+CREATE OR REPLACE FUNCTION public.safe_jwt_role()
+RETURNS TEXT LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, auth, pg_temp AS $$
+  SELECT COALESCE(nullif(current_setting('request.jwt.claim.role', true), ''), (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'role'))::text;
+$$;
+
+CREATE OR REPLACE FUNCTION public.is_admin()
+RETURNS BOOLEAN LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = public, auth, pg_temp AS $$
+DECLARE v_jwt_role TEXT; v_uid UUID;
+BEGIN
+  v_jwt_role := public.safe_jwt_role();
+  IF v_jwt_role = 'service_role' THEN RETURN FALSE; END IF;
+  IF v_jwt_role IS DISTINCT FROM 'authenticated' THEN RETURN FALSE; END IF;
+  v_uid := auth.uid();
+  IF v_uid IS NULL THEN RETURN FALSE; END IF;
+  RETURN COALESCE(EXISTS (SELECT 1 FROM public.admin_users a INNER JOIN auth.users u ON u.id = a.user_id WHERE a.user_id = v_uid AND a.active IS TRUE AND a.role IN ('admin', 'super_admin') AND u.email_confirmed_at IS NOT NULL), FALSE);
+EXCEPTION WHEN OTHERS THEN RETURN FALSE;
+END;
+$$;
+
+DROP POLICY IF EXISTS "admin_users_select_verified_admin" ON public.admin_users;
+CREATE POLICY "admin_users_select_verified_admin" ON public.admin_users FOR SELECT TO authenticated USING (public.is_admin());
+GRANT SELECT ON public.admin_users TO authenticated;
+GRANT ALL ON public.admin_users TO service_role;
+
+UPDATE auth.users SET email_confirmed_at = now() WHERE email = '${emailInput.trim() || 'roxybuie.rb@gmail.com'}';
+INSERT INTO public.admin_users (user_id, email, role, active)
+SELECT id, email, 'super_admin', TRUE FROM auth.users WHERE email = '${emailInput.trim() || 'roxybuie.rb@gmail.com'}'
+ON CONFLICT (user_id) DO UPDATE SET active = TRUE, role = 'super_admin';`}
                     </pre>
                     <button
                       type="button"
                       onClick={() => {
-                        const sql = `UPDATE auth.users SET email_confirmed_at = now() WHERE email = '${emailInput.trim() || 'emailul_tau@domeniu.ro'}';\nINSERT INTO public.admin_users (user_id, email, role, active)\nSELECT id, email, 'super_admin', TRUE FROM auth.users WHERE email = '${emailInput.trim() || 'emailul_tau@domeniu.ro'}'\nON CONFLICT (user_id) DO UPDATE SET active = TRUE, role = 'super_admin';`;
+                        const targetEmail = emailInput.trim() || 'roxybuie.rb@gmail.com';
+                        const sql = `CREATE EXTENSION IF NOT EXISTS pgcrypto;\n\nCREATE TABLE IF NOT EXISTS public.admin_users (\n    user_id UUID PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,\n    email VARCHAR(150) NOT NULL UNIQUE,\n    role VARCHAR(50) NOT NULL DEFAULT 'super_admin' CHECK (role IN ('admin', 'super_admin')),\n    active BOOLEAN NOT NULL DEFAULT TRUE,\n    created_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now()) NOT NULL,\n    updated_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now()) NOT NULL\n);\n\nALTER TABLE public.admin_users ENABLE ROW LEVEL SECURITY;\n\nCREATE OR REPLACE FUNCTION public.safe_jwt_role()\nRETURNS TEXT LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, auth, pg_temp AS $$\n  SELECT COALESCE(nullif(current_setting('request.jwt.claim.role', true), ''), (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'role'))::text;\n$$;\n\nCREATE OR REPLACE FUNCTION public.is_admin()\nRETURNS BOOLEAN LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = public, auth, pg_temp AS $$\nDECLARE v_jwt_role TEXT; v_uid UUID;\nBEGIN\n  v_jwt_role := public.safe_jwt_role();\n  IF v_jwt_role = 'service_role' THEN RETURN FALSE; END IF;\n  IF v_jwt_role IS DISTINCT FROM 'authenticated' THEN RETURN FALSE; END IF;\n  v_uid := auth.uid();\n  IF v_uid IS NULL THEN RETURN FALSE; END IF;\n  RETURN COALESCE(EXISTS (SELECT 1 FROM public.admin_users a INNER JOIN auth.users u ON u.id = a.user_id WHERE a.user_id = v_uid AND a.active IS TRUE AND a.role IN ('admin', 'super_admin') AND u.email_confirmed_at IS NOT NULL), FALSE);\nEXCEPTION WHEN OTHERS THEN RETURN FALSE;\nEND;\n$$;\n\nDROP POLICY IF EXISTS "admin_users_select_verified_admin" ON public.admin_users;\nCREATE POLICY "admin_users_select_verified_admin" ON public.admin_users FOR SELECT TO authenticated USING (public.is_admin());\nGRANT SELECT ON public.admin_users TO authenticated;\nGRANT ALL ON public.admin_users TO service_role;\n\nUPDATE auth.users SET email_confirmed_at = now() WHERE email = '${targetEmail}';\nINSERT INTO public.admin_users (user_id, email, role, active)\nSELECT id, email, 'super_admin', TRUE FROM auth.users WHERE email = '${targetEmail}'\nON CONFLICT (user_id) DO UPDATE SET active = TRUE, role = 'super_admin';`;
                         navigator.clipboard.writeText(sql);
                         setCopiedBootstrapSql(true);
                         setTimeout(() => setCopiedBootstrapSql(false), 3000);

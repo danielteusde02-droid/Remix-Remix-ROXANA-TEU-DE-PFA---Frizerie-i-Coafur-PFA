@@ -59,7 +59,7 @@ export const BookingForm: React.FC<BookingFormProps> = ({
   const turnstileContainerRef = useRef<HTMLDivElement | null>(null);
   const turnstileWidgetIdRef = useRef<string | null>(null);
 
-  const turnstileSiteKey = getTurnstileSiteKey();
+  const turnstileSiteKey = (getTurnstileSiteKey() || '0x4AAAAAAC9vn34-a32h2x7O').trim();
 
   const schedulableServices = services.filter(
     s => s.category !== 'produse' && (s.durationMin === undefined || s.durationMin > 0)
