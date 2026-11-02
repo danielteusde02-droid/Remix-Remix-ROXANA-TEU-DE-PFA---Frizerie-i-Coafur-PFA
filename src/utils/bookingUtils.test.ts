@@ -37,6 +37,7 @@ import {
   PRESET_ORIGINS,
 } from './mapsUtils.js';
 import { dataService } from '../services/dataService.js';
+import { normalizeSupabaseUrl, getTurnstileSiteKey } from '../lib/supabase.js';
 
 test('validateRomanianPhone correctly validates standard Romanian numbers', () => {
   assert.equal(validateRomanianPhone('0741234567'), true);
@@ -296,7 +297,18 @@ test('formatRomanianDateWithDay includes weekday and Romanian month', () => {
 
 test('isValidSupabaseUrl and isValidSupabaseKey accept both legacy JWT and new sb_publishable_ keys while rejecting secret keys', () => {
   assert.equal(isValidSupabaseUrl('https://xyzbarbershop.supabase.co'), true);
+  assert.equal(isValidSupabaseUrl('https://xyzbarbershop.supabase.co/rest/v1'), true);
   assert.equal(isValidSupabaseUrl('https://example.com'), false);
+
+  // normalizeSupabaseUrl strips trailing slashes, /rest/v1, /auth/v1, and query params
+  assert.equal(normalizeSupabaseUrl('https://xyzbarbershop.supabase.co/rest/v1'), 'https://xyzbarbershop.supabase.co');
+  assert.equal(normalizeSupabaseUrl('https://xyzbarbershop.supabase.co/auth/v1/'), 'https://xyzbarbershop.supabase.co');
+  assert.equal(normalizeSupabaseUrl('https://xyzbarbershop.supabase.co/'), 'https://xyzbarbershop.supabase.co');
+  assert.equal(normalizeSupabaseUrl('xyzbarbershop.supabase.co'), 'https://xyzbarbershop.supabase.co');
+
+  // getTurnstileSiteKey returns valid non-empty public key
+  const siteKey = getTurnstileSiteKey();
+  assert.ok(siteKey.startsWith('0x4AAAAAA') || siteKey.length >= 20);
 
   // Legacy JWT anon key
   assert.equal(

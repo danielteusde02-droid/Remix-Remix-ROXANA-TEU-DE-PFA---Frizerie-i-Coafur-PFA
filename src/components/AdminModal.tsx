@@ -7,7 +7,16 @@ import {
 } from 'lucide-react';
 import { Booking, BookingStatus, GalleryItem, MediaCategory, Review, ServicePackage, VisitorLog, SiteImages, ServiceAddon, SectionSettings, CategoryTag } from '../types';
 import { dataService, INITIAL_ADDONS, DEFAULT_GALLERY_SETTINGS, DEFAULT_SERVICES_SETTINGS } from '../services/dataService';
-import { getSupabaseCredentials, saveSupabaseCredentials, testSupabaseConnection, uploadMediaToSupabaseStorage, isSupabaseConfigured } from '../lib/supabase';
+import {
+  getSupabaseCredentials,
+  saveSupabaseCredentials,
+  testSupabaseConnection,
+  uploadMediaToSupabaseStorage,
+  isSupabaseConfigured,
+  normalizeSupabaseUrl,
+  getTurnstileSiteKey,
+  saveTurnstileSiteKey,
+} from '../lib/supabase';
 import { authenticateAdmin, signOutAdmin } from '../utils/authUtils';
 import {
   calculateBarberEstimate,
@@ -54,6 +63,7 @@ export const AdminModal: React.FC<AdminModalProps> = ({
   const [showQuickSupabaseConfig, setShowQuickSupabaseConfig] = useState(false);
   const [quickSaveMessage, setQuickSaveMessage] = useState('');
   const [copiedBootstrapSql, setCopiedBootstrapSql] = useState(false);
+  const [turnstileKeyInput, setTurnstileKeyInput] = useState(getTurnstileSiteKey());
 
   // Tab navigation
   const [activeTab, setActiveTab] = useState<AdminTab>('overview');
@@ -182,6 +192,7 @@ export const AdminModal: React.FC<AdminModalProps> = ({
       const creds = getSupabaseCredentials();
       setSupabaseUrl(creds.url);
       setSupabaseKey(creds.anonKey);
+      setTurnstileKeyInput(getTurnstileSiteKey());
       if (isAdminLoggedIn) {
         loadData();
       }
@@ -711,7 +722,12 @@ export const AdminModal: React.FC<AdminModalProps> = ({
 
   // Save Supabase Credentials
   const handleSaveCredentials = () => {
-    saveSupabaseCredentials(supabaseUrl, supabaseKey);
+    const cleanUrl = normalizeSupabaseUrl(supabaseUrl);
+    setSupabaseUrl(cleanUrl);
+    saveSupabaseCredentials(cleanUrl, supabaseKey);
+    if (turnstileKeyInput.trim()) {
+      saveTurnstileSiteKey(turnstileKeyInput.trim());
+    }
     handleTestConnection();
     loadData();
   };
@@ -870,7 +886,9 @@ export const AdminModal: React.FC<AdminModalProps> = ({
                     Introduceți URL-ul proiectului și cheia publică (Anon Key) din Supabase Dashboard → Settings → API:
                   </p>
                   <div>
-                    <label className="text-[10px] text-zinc-400 block mb-1">VITE_SUPABASE_URL</label>
+                    <label className="text-[10px] text-zinc-400 block mb-1">
+                      VITE_SUPABASE_URL <span className="text-zinc-500">(automat curățat la https://...supabase.co)</span>
+                    </label>
                     <input
                       type="text"
                       value={supabaseUrl}
@@ -889,12 +907,29 @@ export const AdminModal: React.FC<AdminModalProps> = ({
                       className="w-full px-2.5 py-1.5 rounded-lg bg-zinc-950 border border-zinc-700 text-white text-xs font-mono focus:border-[#d4af37] focus:outline-none"
                     />
                   </div>
+                  <div>
+                    <label className="text-[10px] text-zinc-400 block mb-1">
+                      VITE_TURNSTILE_SITE_KEY <span className="text-zinc-500">(Cheia publică anti-bot Cloudflare)</span>
+                    </label>
+                    <input
+                      type="text"
+                      value={turnstileKeyInput}
+                      onChange={e => setTurnstileKeyInput(e.target.value)}
+                      placeholder="0x4AAAAAAC9vn34-a32h2x7O"
+                      className="w-full px-2.5 py-1.5 rounded-lg bg-zinc-950 border border-zinc-700 text-white text-xs font-mono focus:border-[#d4af37] focus:outline-none"
+                    />
+                  </div>
                   <div className="flex items-center gap-2">
                     <button
                       type="button"
                       onClick={() => {
-                        saveSupabaseCredentials(supabaseUrl, supabaseKey);
-                        setQuickSaveMessage('Conexiunea a fost salvată în browser!');
+                        const cleanUrl = normalizeSupabaseUrl(supabaseUrl);
+                        setSupabaseUrl(cleanUrl);
+                        saveSupabaseCredentials(cleanUrl, supabaseKey);
+                        if (turnstileKeyInput.trim()) {
+                          saveTurnstileSiteKey(turnstileKeyInput.trim());
+                        }
+                        setQuickSaveMessage('Conexiunea și cheile au fost salvate cu succes!');
                         setTimeout(() => setQuickSaveMessage(''), 3000);
                       }}
                       className="px-3 py-1.5 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 text-[#d4af37] border border-amber-500/30 text-xs font-semibold cursor-pointer transition-colors"
@@ -3250,6 +3285,19 @@ export const AdminModal: React.FC<AdminModalProps> = ({
                           value={supabaseKey}
                           onChange={e => setSupabaseKey(e.target.value)}
                           placeholder="sb_publishable_... sau eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+                          className="w-full px-3 py-2 rounded-xl bg-zinc-950 border border-zinc-700 text-white font-mono text-xs focus:border-[#d4af37] focus:outline-none"
+                        />
+                      </div>
+
+                      <div>
+                        <label className="text-zinc-300 font-semibold block mb-1">
+                          Cloudflare Turnstile Public Site Key (VITE_TURNSTILE_SITE_KEY)
+                        </label>
+                        <input
+                          type="text"
+                          value={turnstileKeyInput}
+                          onChange={e => setTurnstileKeyInput(e.target.value)}
+                          placeholder="0x4AAAAAAC9vn34-a32h2x7O"
                           className="w-full px-3 py-2 rounded-xl bg-zinc-950 border border-zinc-700 text-white font-mono text-xs focus:border-[#d4af37] focus:outline-none"
                         />
                       </div>

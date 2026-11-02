@@ -4,6 +4,8 @@ import { isValidSupabaseKey, isValidSupabaseUrl } from '../utils/securityUtils';
 // Configuration keys
 const STORAGE_KEY_URL = 'roxana_teusde_supabase_url';
 const STORAGE_KEY_ANON = 'roxana_teusde_supabase_anon_key';
+export const STORAGE_KEY_TURNSTILE = 'roxana_teusde_turnstile_site_key';
+export const DEFAULT_TURNSTILE_SITE_KEY = '0x4AAAAAAC9vn34-a32h2x7O';
 
 export const SUPABASE_STORAGE_BUCKET = 'atelier-media';
 export const MAX_MEDIA_FILE_SIZE_BYTES = 52428800; // 50 MB
@@ -20,8 +22,64 @@ let cachedClient: SupabaseClient | null = null;
 let cachedConfigString = '';
 
 /**
+ * Normalizes any Supabase URL to its strict origin (e.g. 'https://xyzcompany.supabase.co'),
+ * stripping any accidental trailing slashes, /rest/v1, /auth/v1, or subpaths that would break GoTrue auth.
+ */
+export function normalizeSupabaseUrl(rawUrl: string): string {
+  if (!rawUrl) return '';
+  const trimmed = rawUrl.trim();
+  try {
+    const parsed = new URL(trimmed);
+    return parsed.origin;
+  } catch {
+    try {
+      const parsedWithHttps = new URL(`https://${trimmed.replace(/^https?:\/\//, '')}`);
+      return parsedWithHttps.origin;
+    } catch {
+      return trimmed.replace(/\/+$/, '');
+    }
+  }
+}
+
+/**
+ * Returns the Cloudflare Turnstile public site key, prioritizing environment variables,
+ * then localStorage, falling back to the configured site key.
+ */
+export function getTurnstileSiteKey(): string {
+  const envKey =
+    typeof import.meta !== 'undefined' && import.meta.env
+      ? (import.meta.env.VITE_TURNSTILE_SITE_KEY || '').trim()
+      : '';
+
+  let storedKey = '';
+  if (typeof window !== 'undefined' && window.localStorage) {
+    try {
+      storedKey = (window.localStorage.getItem(STORAGE_KEY_TURNSTILE) || '').trim();
+    } catch {
+      // Ignore localStorage access restrictions
+    }
+  }
+
+  return envKey || storedKey || DEFAULT_TURNSTILE_SITE_KEY;
+}
+
+/**
+ * Saves the Turnstile site key to localStorage
+ */
+export function saveTurnstileSiteKey(key: string): void {
+  if (typeof window !== 'undefined' && window.localStorage) {
+    try {
+      window.localStorage.setItem(STORAGE_KEY_TURNSTILE, key.trim());
+    } catch (err) {
+      console.warn('Could not save Turnstile key to localStorage', err);
+    }
+  }
+}
+
+/**
  * Retrieves the current Supabase configuration, prioritizing environment variables
  * (VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY), then falling back to localStorage.
+ * Automatically normalizes the URL to guarantee clean origin (no /rest/v1 or trailing slashes).
  */
 export function getSupabaseCredentials(): { url: string; anonKey: string } {
   const envUrl =
@@ -45,8 +103,11 @@ export function getSupabaseCredentials(): { url: string; anonKey: string } {
     }
   }
 
+  const rawUrl = (envUrl || storedUrl).trim();
+  const normalizedUrl = normalizeSupabaseUrl(rawUrl);
+
   return {
-    url: (envUrl || storedUrl).trim(),
+    url: normalizedUrl,
     anonKey: (envKey || storedKey).trim(),
   };
 }
@@ -60,12 +121,13 @@ export function isSupabaseConfigured(): boolean {
 }
 
 /**
- * Saves Supabase credentials to localStorage
+ * Saves Supabase credentials to localStorage with automatic URL normalization
  */
 export function saveSupabaseCredentials(url: string, anonKey: string): void {
   if (typeof window !== 'undefined' && window.localStorage) {
     try {
-      window.localStorage.setItem(STORAGE_KEY_URL, url.trim());
+      const normalized = normalizeSupabaseUrl(url);
+      window.localStorage.setItem(STORAGE_KEY_URL, normalized);
       window.localStorage.setItem(STORAGE_KEY_ANON, anonKey.trim());
       cachedClient = null; // Invalidate cache
       cachedConfigString = '';

@@ -17,6 +17,7 @@ import {
   validateRomanianPhone
 } from '../utils/bookingUtils';
 import { dataService, BARBERSHOP_STAFF, INITIAL_ADDONS } from '../services/dataService';
+import { getTurnstileSiteKey } from '../lib/supabase';
 import { CalendarDatePicker } from './CalendarDatePicker';
 
 interface BookingFormProps {
@@ -58,10 +59,7 @@ export const BookingForm: React.FC<BookingFormProps> = ({
   const turnstileContainerRef = useRef<HTMLDivElement | null>(null);
   const turnstileWidgetIdRef = useRef<string | null>(null);
 
-  const turnstileSiteKey =
-    typeof import.meta !== 'undefined' && import.meta.env
-      ? (import.meta.env.VITE_TURNSTILE_SITE_KEY || '').trim()
-      : '';
+  const turnstileSiteKey = getTurnstileSiteKey();
 
   const schedulableServices = services.filter(
     s => s.category !== 'produse' && (s.durationMin === undefined || s.durationMin > 0)

@@ -16,8 +16,14 @@ export interface SecurityPolicySummary {
 export function isValidSupabaseUrl(url: string): boolean {
   if (!url) return false;
   try {
-    const parsed = new URL(url.trim());
-    return parsed.protocol === 'https:' && parsed.hostname.includes('.supabase.co');
+    const trimmed = url.trim();
+    const candidate = trimmed.startsWith('http://') || trimmed.startsWith('https://')
+      ? trimmed
+      : `https://${trimmed}`;
+    const parsed = new URL(candidate);
+    return (parsed.protocol === 'https:' || parsed.protocol === 'http:') &&
+      parsed.hostname.endsWith('.supabase.co') &&
+      parsed.hostname.length > 12;
   } catch {
     return false;
   }

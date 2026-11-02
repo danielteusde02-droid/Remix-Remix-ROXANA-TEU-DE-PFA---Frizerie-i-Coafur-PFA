@@ -263,12 +263,16 @@ export async function authenticateAdmin(
         failureReason: error?.message || 'Supabase Auth: Date de autentificare invalide',
       });
 
+      let friendlyMsg = `Autentificare eșuată: ${error?.message || 'Credențiale invalide'}`;
+      if (error?.message === 'Invalid login credentials') {
+        friendlyMsg = 'Email sau parolă incorectă în Supabase Auth. Verificați dacă utilizatorul există în Supabase Dashboard → Authentication → Users.';
+      } else if (error?.message?.includes('Invalid path specified in request URL')) {
+        friendlyMsg = 'URL-ul Supabase configurat conținea o cale invalidă (ex: /rest/v1 sau bară la final). Adresa a fost normalizată automat; reîncercați autentificarea acum.';
+      }
+
       return {
         success: false,
-        error:
-          error?.message === 'Invalid login credentials'
-            ? 'Email sau parolă incorectă în Supabase Auth.'
-            : `Autentificare eșuată: ${error?.message || 'Credențiale invalide'}`,
+        error: friendlyMsg,
       };
     }
 
