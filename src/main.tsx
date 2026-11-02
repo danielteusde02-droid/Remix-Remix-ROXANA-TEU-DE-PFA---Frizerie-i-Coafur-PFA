@@ -2,6 +2,15 @@ import {createRoot} from 'react-dom/client';
 import App from './App.tsx';
 import './index.css';
 
+// Clear any obsolete service workers or caches if present
+if (typeof window !== 'undefined' && 'serviceWorker' in navigator) {
+  navigator.serviceWorker.getRegistrations().then((registrations) => {
+    for (const reg of registrations) {
+      reg.unregister().catch(() => {});
+    }
+  }).catch(() => {});
+}
+
 // Catch strictly identified masked cross-origin "Script error." events from external third-party widgets
 // (Google Maps JS SDK / Cloudflare Turnstile) without hiding any real application JavaScript errors.
 window.addEventListener(
