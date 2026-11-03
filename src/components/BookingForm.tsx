@@ -52,16 +52,14 @@ export const BookingForm: React.FC<BookingFormProps> = ({
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [errorMessage, setErrorMessage] = useState('');
   const [successBooking, setSuccessBooking] = useState<Booking | null>(null);
-  const [turnstileToken, setTurnstileToken] = useState<string>(
-    () => `cf_pass_${Date.now()}_${Math.random().toString(36).substring(2, 10)}`
-  );
-  const [turnstileStatus, setTurnstileStatus] = useState<'loading' | 'ready' | 'verified' | 'expired' | 'error'>('verified');
+  const [turnstileToken, setTurnstileToken] = useState<string>('');
+  const [turnstileStatus, setTurnstileStatus] = useState<'idle' | 'loading' | 'ready' | 'verified' | 'expired' | 'error'>('idle');
   const [turnstileErrorDetail, setTurnstileErrorDetail] = useState<string>('');
 
   const turnstileContainerRef = useRef<HTMLDivElement | null>(null);
   const turnstileWidgetIdRef = useRef<string | null>(null);
 
-  const turnstileSiteKey = (getTurnstileSiteKey() || '0x4AAAAAAC9vn34-a32h2x7O').trim();
+  const turnstileSiteKey = getTurnstileSiteKey().trim();
 
   const schedulableServices = services.filter(
     s => s.category !== 'produse' && (s.durationMin === undefined || s.durationMin > 0)
@@ -88,48 +86,30 @@ export const BookingForm: React.FC<BookingFormProps> = ({
     if (win.turnstile && turnstileWidgetIdRef.current !== null) {
       try {
         win.turnstile.reset(turnstileWidgetIdRef.current);
+        setTurnstileToken('');
         setTurnstileStatus('ready');
         setTurnstileErrorDetail('');
-        return;
-      } catch {
-        // Fall through to full re-render if reset fails
+      } catch (err) {
+        console.warn('Turnstile reset error:', err);
       }
     }
   }, []);
 
-  // Explicitly load and render Cloudflare Turnstile widget, with graceful resilient fallback
+  // Explicitly load and render Cloudflare Turnstile widget
   useEffect(() => {
     if (successBooking) return;
     if (typeof window === 'undefined') return;
-
-    let isCancelled = false;
-
-    const assignFallbackToken = () => {
-      if (isCancelled) return;
-      const fallbackToken = `cf_turnstile_pass_token_${Date.now()}_${Math.random().toString(36).substring(2, 10)}`;
-      setTurnstileToken(fallbackToken);
-      setTurnstileStatus('verified');
-      setTurnstileErrorDetail('');
-    };
-
-    const isLocalOrPreview =
-      typeof window !== 'undefined' &&
-      (window.location.hostname === 'localhost' ||
-        window.location.hostname === '127.0.0.1' ||
-        window.location.hostname.includes('webcontainer') ||
-        window.location.hostname.includes('googleusercontent') ||
-        window.location.hostname.includes('aistudio'));
-
-    if (!turnstileSiteKey || isLocalOrPreview) {
-      assignFallbackToken();
+    if (!turnstileSiteKey) {
+      setTurnstileStatus('idle');
       return;
     }
+
+    let isCancelled = false;
 
     const renderWidget = () => {
       if (isCancelled || !turnstileContainerRef.current) return;
       const win = window as any;
       if (!win.turnstile || typeof win.turnstile.render !== 'function') {
-        assignFallbackToken();
         return;
       }
 
@@ -145,7 +125,7 @@ export const BookingForm: React.FC<BookingFormProps> = ({
       turnstileContainerRef.current.innerHTML = '';
 
       try {
-        setTurnstileStatus('ready');
+        setTurnstileStatus('loading');
         const widgetId = win.turnstile.render(turnstileContainerRef.current, {
           sitekey: turnstileSiteKey,
           action: 'create_booking',
@@ -156,69 +136,56 @@ export const BookingForm: React.FC<BookingFormProps> = ({
               setTurnstileToken(token.trim());
               setTurnstileStatus('verified');
               setTurnstileErrorDetail('');
-            } else {
-              assignFallbackToken();
             }
           },
           'expired-callback': () => {
             if (isCancelled) return;
-            assignFallbackToken();
+            setTurnstileToken('');
+            setTurnstileStatus('expired');
           },
           'timeout-callback': () => {
             if (isCancelled) return;
-            assignFallbackToken();
+            setTurnstileToken('');
+            setTurnstileStatus('expired');
           },
           'error-callback': (errorCode?: string | number) => {
             if (isCancelled) return true;
             console.warn('Turnstile error-callback encountered:', errorCode);
-            assignFallbackToken();
+            setTurnstileToken('');
+            setTurnstileStatus('error');
+            setTurnstileErrorDetail(
+              `Eroare verificare securitate (${errorCode || 'necunoscută'}). Asigurați-vă că domeniul este adăugat în Cloudflare.`
+            );
             return true;
           },
         });
         turnstileWidgetIdRef.current = widgetId;
-      } catch (err) {
-        console.warn('Turnstile render catch, falling back to auto-pass:', err);
-        assignFallbackToken();
+        setTurnstileStatus('ready');
+      } catch (err: any) {
+        console.warn('Turnstile render catch:', err);
+        setTurnstileStatus('error');
+        setTurnstileErrorDetail(err?.message || 'Eroare la inițializarea Turnstile.');
       }
     };
-
-    const handleExternalScriptError = () => {
-      if (isCancelled) return;
-      console.warn('Turnstile external script failed, assigning fallback token');
-      assignFallbackToken();
-    };
-
-
-    window.addEventListener('turnstile-script-error', handleExternalScriptError);
 
     const win = window as any;
     if (win.turnstile && typeof win.turnstile.render === 'function') {
       renderWidget();
     } else {
-      const existingScript = document.getElementById('cf-turnstile-script') as HTMLScriptElement | null;
-      if (existingScript) {
-        existingScript.addEventListener('load', renderWidget);
-        existingScript.addEventListener('error', handleExternalScriptError);
-      } else {
-        const script = document.createElement('script');
-        script.id = 'cf-turnstile-script';
-        script.src = 'https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit';
-        script.async = true;
-        script.defer = true;
-        script.onload = renderWidget;
-        script.onerror = handleExternalScriptError;
-        document.head.appendChild(script);
+      let existingScript = document.getElementById('cf-turnstile-script') as HTMLScriptElement | null;
+      if (!existingScript) {
+        existingScript = document.createElement('script');
+        existingScript.id = 'cf-turnstile-script';
+        existingScript.src = 'https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit';
+        existingScript.async = true;
+        existingScript.defer = true;
+        document.head.appendChild(existingScript);
       }
+      existingScript.addEventListener('load', renderWidget);
     }
 
     return () => {
       isCancelled = true;
-      window.removeEventListener('turnstile-script-error', handleExternalScriptError);
-      const existingScript = document.getElementById('cf-turnstile-script') as HTMLScriptElement | null;
-      if (existingScript) {
-        existingScript.removeEventListener('load', renderWidget);
-        existingScript.removeEventListener('error', handleExternalScriptError);
-      }
       if ((window as any).turnstile && turnstileWidgetIdRef.current !== null) {
         try {
           (window as any).turnstile.remove(turnstileWidgetIdRef.current);
@@ -316,12 +283,19 @@ export const BookingForm: React.FC<BookingFormProps> = ({
       return;
     }
 
-    // Cloudflare Turnstile anti-bot check with resilient fallback
-    let effectiveTurnstileToken = turnstileToken ? turnstileToken.trim() : '';
-    if (!effectiveTurnstileToken || effectiveTurnstileToken.length < 20) {
-      effectiveTurnstileToken = `cf_turnstile_pass_token_${Date.now()}_${Math.random().toString(36).substring(2, 10)}`;
-      setTurnstileToken(effectiveTurnstileToken);
-      setTurnstileStatus('verified');
+    // Verificare obligatorie Cloudflare Turnstile
+    if (!turnstileSiteKey) {
+      setErrorMessage(
+        'Protecția anti-bot (VITE_TURNSTILE_SITE_KEY) nu este configurată. Formularul de programare este blocat până la configurarea cheii publice Turnstile.'
+      );
+      return;
+    }
+
+    if (!turnstileToken || turnstileToken.trim().length < 20) {
+      setErrorMessage(
+        'Vă rugăm să finalizați verificarea de securitate Cloudflare Turnstile înainte de a confirma programarea.'
+      );
+      return;
     }
 
     setIsSubmitting(true);
@@ -344,17 +318,17 @@ export const BookingForm: React.FC<BookingFormProps> = ({
           notes: formData.notes.trim(),
           addons,
         },
-        effectiveTurnstileToken
+        turnstileToken.trim()
       );
 
       setSuccessBooking(created);
       setTurnstileToken('');
-      setTurnstileStatus('loading');
+      setTurnstileStatus('idle');
       if (onBookingCreated) {
         onBookingCreated(created);
       }
     } catch (err: any) {
-      // Single-use token: always reset Turnstile widget after any server error so a fresh token is generated
+      // Token cu utilizare unică: resetăm întotdeauna widgetul Cloudflare Turnstile după orice respingere de la server
       resetTurnstileWidget();
       setErrorMessage(
         err?.message || 'A apărut o problemă la salvarea programării. Vă rugăm să verificați datele și să încercați din nou.'
@@ -772,15 +746,30 @@ Telefon / WhatsApp: +40 751 676 420
                 </div>
               </div>
 
-              {/* Cloudflare Turnstile Widget (optional live visual challenge) */}
-              <div className="flex flex-col items-center justify-center pt-2">
-                <div ref={turnstileContainerRef} className="min-h-[65px] flex items-center justify-center" />
-              </div>
+              {/* Alertă când cheia publică Turnstile nu este configurată */}
+              {!turnstileSiteKey && (
+                <div className="p-4 rounded-xl bg-amber-500/10 border border-amber-500/30 text-amber-300 text-xs flex items-center gap-3">
+                  <ShieldAlert className="w-5 h-5 text-amber-400 shrink-0" />
+                  <span>
+                    Protecția anti-bot (VITE_TURNSTILE_SITE_KEY) nu este configurată. Formularul de programare este blocat până la configurarea cheii publice Turnstile.
+                  </span>
+                </div>
+              )}
+
+              {/* Cloudflare Turnstile Widget (Managed Mode) */}
+              {turnstileSiteKey && (
+                <div className="flex flex-col items-center justify-center pt-2">
+                  <div ref={turnstileContainerRef} className="min-h-[65px] flex items-center justify-center" />
+                  {turnstileErrorDetail && (
+                    <p className="text-[11px] text-amber-400 mt-1">{turnstileErrorDetail}</p>
+                  )}
+                </div>
+              )}
 
               {/* Submit */}
               <button
                 type="submit"
-                disabled={isSubmitting}
+                disabled={isSubmitting || !turnstileSiteKey || !turnstileToken}
                 className="w-full py-4 px-8 rounded-xl bg-gradient-to-r from-[#d4af37] to-[#b8972f] hover:from-[#e2bf4b] hover:to-[#c6a337] text-zinc-950 font-bold text-base shadow-lg shadow-amber-500/20 flex items-center justify-center gap-3 transition-all cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 {isSubmitting ? (

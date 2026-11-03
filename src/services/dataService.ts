@@ -744,16 +744,13 @@ export const dataService = {
     bookingInput: Omit<Booking, 'id' | 'referenceCode' | 'createdAt' | 'updatedAt' | 'status'>,
     turnstileToken?: string
   ): Promise<Booking> {
-    if (turnstileToken !== undefined && (typeof turnstileToken !== 'string' || turnstileToken.trim().length < 20)) {
+    if (!turnstileToken || typeof turnstileToken !== 'string' || turnstileToken.trim().length < 20) {
       throw new Error(
-        'Verificarea anti-bot Cloudflare Turnstile este necesară. Vă rugăm să validați provocarea de securitate și să reîncercați.'
+        'Verificarea anti-bot Cloudflare Turnstile este obligatorie. Vă rugăm să validați provocarea de securitate înainte de a trimite programarea.'
       );
     }
 
-    const effectiveTurnstileToken =
-      turnstileToken && typeof turnstileToken === 'string' && turnstileToken.trim().length >= 20
-        ? turnstileToken.trim()
-        : `cf_turnstile_pass_token_${Date.now()}_${Math.random().toString(36).substring(2, 10)}`;
+    const cleanToken = turnstileToken.trim();
 
     // Compute real duration from service + addons to validate schedule before sending
     const allServices = getLocalItem<ServicePackage[]>(STORAGE_SERVICES, INITIAL_SERVICES);
@@ -788,13 +785,6 @@ export const dataService = {
       updatedAt: new Date().toISOString(),
     };
 
-    const supabase = getSupabase();
-    if (!supabase) {
-      throw new Error(
-        'Conexiunea cu serverul securizat Supabase nu este configurată. Programările nu pot fi înregistrate fără verificarea server-side Turnstile.'
-      );
-    }
-
     const dbRow = {
       reference_code: newBooking.referenceCode,
       client_name: newBooking.clientName,
@@ -815,48 +805,89 @@ export const dataService = {
       admin_notes: '',
     };
 
+    // 1. Apel către backend (/api/create-booking sau /.netlify/functions/create-booking)
+    // Serverul verifică tokenul cu secretul TURNSTILE_SECRET_KEY direct la Cloudflare Siteverify API
+    let apiSuccess = false;
     try {
-      const { data: fnData, error: fnError } = await supabase.functions.invoke('create-booking-turnstile', {
-        body: {
+      const apiUrl =
+        typeof window !== 'undefined' && window.location
+          ? '/api/create-booking'
+          : 'http://localhost:3000/api/create-booking';
+
+      const apiRes = await fetch(apiUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
           ...dbRow,
-          turnstileToken: effectiveTurnstileToken,
-        },
+          turnstileToken: cleanToken,
+        }),
       });
 
-      if (!fnError && fnData && fnData.success === true) {
-        if (fnData.booking) {
-          if (fnData.booking.id) newBooking.id = fnData.booking.id;
-          if (fnData.booking.reference_code) newBooking.referenceCode = fnData.booking.reference_code;
-          if (typeof fnData.booking.estimated_total === 'number') {
-            newBooking.estimatedTotal = Number(fnData.booking.estimated_total);
+      const apiJson = await apiRes.json().catch(() => null);
+
+      if (apiRes.ok && apiJson && apiJson.success === true) {
+        if (apiJson.booking) {
+          if (apiJson.booking.id) newBooking.id = apiJson.booking.id;
+          if (apiJson.booking.reference_code) newBooking.referenceCode = apiJson.booking.reference_code;
+          if (typeof apiJson.booking.estimated_total === 'number') {
+            newBooking.estimatedTotal = Number(apiJson.booking.estimated_total);
           }
         }
-        const isInit = getLocalItem<boolean>(STORAGE_BOOKINGS_INIT, false);
-        const current = getLocalItem<Booking[]>(STORAGE_BOOKINGS, isInit ? [] : INITIAL_BOOKINGS);
-        setLocalItem(STORAGE_BOOKINGS, [newBooking, ...current]);
-        setLocalItem(STORAGE_BOOKINGS_INIT, true);
-        return newBooking;
+        apiSuccess = true;
+      } else if (apiRes.status === 403 || apiRes.status === 400) {
+        // Respingere explicită Turnstile (token invalid, expirat, duplicate, acțiune eronată)
+        const errorMessage =
+          apiJson?.error || 'Verificarea anti-bot Cloudflare Turnstile a eșuat. Vă rugăm să reîncercați.';
+        throw new Error(errorMessage);
+      } else if (apiRes.status !== 404 && apiJson?.error) {
+        throw new Error(apiJson.error);
       }
-    } catch (edgeErr) {
-      console.warn('Edge Function create-booking-turnstile invoke error, trying direct DB insert:', edgeErr);
+    } catch (err: any) {
+      if (err.message && !err.message.includes('Failed to fetch') && !err.message.includes('404')) {
+        throw err;
+      }
     }
 
-    // Direct database insert fallback for environments where Edge Function is not yet deployed
-    try {
-      const { data: directData, error: directError } = await supabase
-        .from('bookings')
-        .insert(dbRow)
-        .select()
-        .maybeSingle();
+    // 2. Dacă /api/create-booking a returnat 404 (endpoint nedisponibil local), încercăm Supabase Edge Function
+    if (!apiSuccess) {
+      const supabase = getSupabase();
+      if (supabase) {
+        try {
+          const { data: fnData, error: fnError } = await supabase.functions.invoke(
+            'create-booking-turnstile',
+            {
+              body: {
+                ...dbRow,
+                turnstileToken: cleanToken,
+              },
+            }
+          );
 
-      if (!directError && directData) {
-        if (directData.id) newBooking.id = directData.id;
-        if (directData.reference_code) newBooking.referenceCode = directData.reference_code;
-      } else if (directError) {
-        console.warn('Direct DB insert notice:', directError.message);
+          if (!fnError && fnData && fnData.success === true) {
+            if (fnData.booking) {
+              if (fnData.booking.id) newBooking.id = fnData.booking.id;
+              if (fnData.booking.reference_code) newBooking.referenceCode = fnData.booking.reference_code;
+              if (typeof fnData.booking.estimated_total === 'number') {
+                newBooking.estimatedTotal = Number(fnData.booking.estimated_total);
+              }
+            }
+            apiSuccess = true;
+          } else if (fnError || (fnData && fnData.success === false)) {
+            const edgeMsg = fnData?.error || fnError?.message || 'Verificarea anti-bot a eșuat pe server.';
+            throw new Error(edgeMsg);
+          }
+        } catch (edgeErr: any) {
+          if (edgeErr.message && !edgeErr.message.includes('Failed to fetch') && !edgeErr.message.includes('404')) {
+            throw edgeErr;
+          }
+        }
       }
-    } catch (dbErr) {
-      console.warn('Direct DB insert catch:', dbErr);
+    }
+
+    if (!apiSuccess) {
+      throw new Error(
+        'Serverul de validare a programărilor nu a putut fi contactat. Asigurați-vă că variabilele de mediu sunt configurate pe server (Netlify sau Supabase).'
+      );
     }
 
     const isInit = getLocalItem<boolean>(STORAGE_BOOKINGS_INIT, false);
