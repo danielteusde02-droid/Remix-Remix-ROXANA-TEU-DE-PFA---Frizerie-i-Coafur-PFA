@@ -5,7 +5,7 @@ import { isValidSupabaseKey, isValidSupabaseUrl } from '../utils/securityUtils';
 const STORAGE_KEY_URL = 'roxana_teusde_supabase_url';
 const STORAGE_KEY_ANON = 'roxana_teusde_supabase_anon_key';
 export const STORAGE_KEY_TURNSTILE = 'roxana_teusde_turnstile_site_key';
-export const DEFAULT_TURNSTILE_SITE_KEY = '0x4AAAAAAC9vn34-a32h2x7O';
+export const DEFAULT_TURNSTILE_SITE_KEY = '0x4AAAAAAFxuvMnfQmIDu7nE';
 
 export const SUPABASE_STORAGE_BUCKET = 'atelier-media';
 export const MAX_MEDIA_FILE_SIZE_BYTES = 52428800; // 50 MB
