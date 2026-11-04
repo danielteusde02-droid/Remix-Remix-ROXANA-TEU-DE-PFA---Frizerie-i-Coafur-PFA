@@ -155,8 +155,14 @@ function apiServerPlugin(): Plugin {
             }
 
             // Inserare în baza de date Supabase tabela bookings
-            const supabaseUrl =
+            const rawSupabaseUrl =
               process.env.VITE_SUPABASE_URL || 'https://pjosobviitajlnjxwbza.supabase.co';
+            let supabaseUrl = 'https://pjosobviitajlnjxwbza.supabase.co';
+            try {
+              supabaseUrl = new URL(rawSupabaseUrl.trim()).origin;
+            } catch {
+              supabaseUrl = rawSupabaseUrl.trim().replace(/\/rest\/v1\/?$/i, '').replace(/\/+$/, '');
+            }
             const supabaseKey =
               process.env.VITE_SUPABASE_ANON_KEY || 'sb_publishable_SRHimk0zyqIFt1Tkb_9_iw_olt5tGHm';
 

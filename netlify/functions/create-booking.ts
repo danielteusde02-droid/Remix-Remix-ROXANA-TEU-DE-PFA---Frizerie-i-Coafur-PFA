@@ -11,10 +11,8 @@
  * 3. Validează acțiunea exactă (`action === 'create_booking'`).
  * 4. Validează domeniul autorizat (`hostname === 'roxanateusdepfa.netlify.app'` sau lista aprobată).
  * 5. Previne trimiterile duplicate (atât la nivel de token single-use, cât și la nivel de slot/client în Supabase).
- * 6. Salvează programarea în Supabase tabela `public.bookings`.
+ * 6. Salvează programarea în Supabase tabela `public.bookings` folosind REST API nativ (fără dependențe externe care pot cauza erori ESM/CJS 500 la încărcarea Lambda).
  */
-
-import { createClient } from '@supabase/supabase-js';
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -33,6 +31,20 @@ interface TurnstileVerifyResponse {
 
 const EXPECTED_ACTION = 'create_booking';
 const PRIMARY_AUTHORIZED_HOSTNAME = 'roxanateusdepfa.netlify.app';
+
+/**
+ * Normalizează orice URL Supabase la originea sa curată (ex: https://pjosobviitajlnjxwbza.supabase.co),
+ * eliminând sufixe precum /rest/v1/ care ar dubla calea și ar cauza HTTP 500.
+ */
+function normalizeSupabaseOrigin(rawUrl: string): string {
+  const trimmed = (rawUrl || '').trim();
+  if (!trimmed) return 'https://pjosobviitajlnjxwbza.supabase.co';
+  try {
+    return new URL(trimmed).origin;
+  } catch {
+    return trimmed.replace(/\/rest\/v1\/?$/i, '').replace(/\/+$/, '');
+  }
+}
 
 export async function handler(event: any) {
   // 1. Tratează cererile CORS Preflight
@@ -140,7 +152,7 @@ export async function handler(event: any) {
       }
 
       verifyResult = (await verifyResponse.json()) as TurnstileVerifyResponse;
-    } catch (fetchErr) {
+    } catch {
       return {
         statusCode: 502,
         headers: { ...corsHeaders, 'Content-Type': 'application/json' },
@@ -248,43 +260,58 @@ export async function handler(event: any) {
       };
     }
 
-    // 10. Conectare la Supabase și prevenire trimiteri duplicate
-    const supabaseUrl =
+    // 10. Conectare la Supabase REST API și prevenire trimiteri duplicate
+    const supabaseOrigin = normalizeSupabaseOrigin(
       process.env.VITE_SUPABASE_URL ||
-      process.env.SUPABASE_URL ||
-      'https://pjosobviitajlnjxwbza.supabase.co';
+        process.env.SUPABASE_URL ||
+        'https://pjosobviitajlnjxwbza.supabase.co'
+    );
 
-    const supabaseKey =
+    const supabaseKey = (
       process.env.SUPABASE_SERVICE_ROLE_KEY ||
       process.env.VITE_SUPABASE_ANON_KEY ||
       process.env.SUPABASE_ANON_KEY ||
-      'sb_publishable_SRHimk0zyqIFt1Tkb_9_iw_olt5tGHm';
+      'sb_publishable_SRHimk0zyqIFt1Tkb_9_iw_olt5tGHm'
+    ).trim();
 
-    const supabase = createClient(supabaseUrl, supabaseKey, {
-      auth: { persistSession: false, autoRefreshToken: false },
+    const restHeaders: Record<string, string> = {
+      apikey: supabaseKey,
+      Authorization: `Bearer ${supabaseKey}`,
+      'Content-Type': 'application/json',
+    };
+
+    // Verificare anti-duplicat: același frizer în același slot activ
+    const duplicateQuery = new URLSearchParams({
+      select: 'id,reference_code',
+      event_date: `eq.${eventDate}`,
+      event_time: `eq.${eventTime}`,
+      barber_name: `eq.${barberName}`,
+      status: 'in.(in_asteptare,confirmat)',
+      limit: '1',
     });
 
-    // Verificare anti-duplicat: același client/telefon sau același frizer în același slot activ
-    const { data: existingDuplicate } = await supabase
-      .from('bookings')
-      .select('id, reference_code')
-      .eq('event_date', eventDate)
-      .eq('event_time', eventTime)
-      .eq('barber_name', barberName)
-      .in('status', ['in_asteptare', 'confirmat'])
-      .limit(1)
-      .maybeSingle();
+    const dupRes = await fetch(
+      `${supabaseOrigin}/rest/v1/bookings?${duplicateQuery.toString()}`,
+      {
+        method: 'GET',
+        headers: restHeaders,
+        signal: AbortSignal.timeout(10000),
+      }
+    );
 
-    if (existingDuplicate) {
-      return {
-        statusCode: 409,
-        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          success: false,
-          error:
-            'Acest interval orar tocmai a fost rezervat. Vă rugăm să alegeți o altă oră disponibilă.',
-        }),
-      };
+    if (dupRes.ok) {
+      const dupList = (await dupRes.json()) as any[];
+      if (Array.isArray(dupList) && dupList.length > 0) {
+        return {
+          statusCode: 409,
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            success: false,
+            error:
+              'Acest interval orar tocmai a fost rezervat. Vă rugăm să alegeți o altă oră disponibilă.',
+          }),
+        };
+      }
     }
 
     const bookingRow = {
@@ -309,23 +336,31 @@ export async function handler(event: any) {
       admin_notes: '',
     };
 
-    const { data: dbData, error: dbError } = await supabase
-      .from('bookings')
-      .insert(bookingRow)
-      .select()
-      .single();
+    const insertRes = await fetch(`${supabaseOrigin}/rest/v1/bookings?select=*`, {
+      method: 'POST',
+      headers: {
+        ...restHeaders,
+        Prefer: 'return=representation',
+      },
+      signal: AbortSignal.timeout(10000),
+      body: JSON.stringify(bookingRow),
+    });
 
-    if (dbError) {
-      console.error('Eroare inserare Supabase bookings:', dbError);
+    if (!insertRes.ok) {
+      const errText = await insertRes.text();
+      console.error('Eroare inserare Supabase bookings:', insertRes.status, errText);
       return {
         statusCode: 500,
         headers: { ...corsHeaders, 'Content-Type': 'application/json' },
         body: JSON.stringify({
           success: false,
-          error: `Eroare la salvarea în baza de date Supabase: ${dbError.message}`,
+          error: `Eroare la salvarea în baza de date Supabase (${insertRes.status}).`,
         }),
       };
     }
+
+    const insertedRows = (await insertRes.json()) as any[];
+    const dbData = Array.isArray(insertedRows) && insertedRows.length > 0 ? insertedRows[0] : bookingRow;
 
     return {
       statusCode: 200,
