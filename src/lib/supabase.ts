@@ -7,6 +7,20 @@ const STORAGE_KEY_ANON = 'roxana_teusde_supabase_anon_key';
 export const STORAGE_KEY_TURNSTILE = 'roxana_teusde_turnstile_site_key';
 export const DEFAULT_TURNSTILE_SITE_KEY = '0x4AAAAAAFy_iG_g6jNTFe-I';
 
+// Old deleted Turnstile widget keys that return Cloudflare error 400020 (Invalid sitekey)
+const DEPRECATED_TURNSTILE_SITE_KEYS = new Set<string>([
+  '0x4AAAAAAFwOexYPqmzq_p4n',
+  '0x4AAAAAAAFxuvMnfQmIDu7nE',
+  '0x4AAAAAAFxuvMnfQmIDu7nE',
+]);
+
+function isValidActiveTurnstileSiteKey(key: string): boolean {
+  const trimmed = key.trim();
+  if (!trimmed || trimmed.length !== 24) return false;
+  if (DEPRECATED_TURNSTILE_SITE_KEYS.has(trimmed)) return false;
+  return true;
+}
+
 export const SUPABASE_STORAGE_BUCKET = 'atelier-media';
 export const MAX_MEDIA_FILE_SIZE_BYTES = 52428800; // 50 MB
 export const ALLOWED_MEDIA_MIME_TYPES = [
@@ -42,21 +56,32 @@ export function normalizeSupabaseUrl(rawUrl: string): string {
 }
 
 /**
- * Returns the Cloudflare Turnstile public site key, prioritizing environment variables,
- * then localStorage (configured via AdminModal), falling back to the existing widget Site Key.
+ * Returns the Cloudflare Turnstile public site key, prioritizing valid environment variables,
+ * then valid localStorage values, and automatically purging any deprecated/deleted keys
+ * so that the active widget Site Key (0x4AAAAAAFy_iG_g6jNTFe-I) is always used.
  */
 export function getTurnstileSiteKey(): string {
-  const envKey =
+  const rawEnvKey =
     typeof import.meta !== 'undefined' && import.meta.env
       ? (import.meta.env.VITE_TURNSTILE_SITE_KEY || '').trim()
       : typeof process !== 'undefined' && process.env
       ? (process.env.VITE_TURNSTILE_SITE_KEY || '').trim()
       : '';
 
+  const envKey = isValidActiveTurnstileSiteKey(rawEnvKey) ? rawEnvKey : '';
+
   let storedKey = '';
   if (typeof window !== 'undefined' && window.localStorage) {
     try {
-      storedKey = (window.localStorage.getItem(STORAGE_KEY_TURNSTILE) || '').trim();
+      const rawStored = (window.localStorage.getItem(STORAGE_KEY_TURNSTILE) || '').trim();
+      if (rawStored) {
+        if (isValidActiveTurnstileSiteKey(rawStored)) {
+          storedKey = rawStored;
+        } else {
+          // Purge deprecated or invalid sitekey from browser localStorage
+          window.localStorage.removeItem(STORAGE_KEY_TURNSTILE);
+        }
+      }
     } catch {
       // Ignore localStorage access restrictions
     }
@@ -66,12 +91,17 @@ export function getTurnstileSiteKey(): string {
 }
 
 /**
- * Saves the Turnstile site key to localStorage
+ * Saves the Turnstile site key to localStorage if valid
  */
 export function saveTurnstileSiteKey(key: string): void {
   if (typeof window !== 'undefined' && window.localStorage) {
     try {
-      window.localStorage.setItem(STORAGE_KEY_TURNSTILE, key.trim());
+      const trimmed = key.trim();
+      if (isValidActiveTurnstileSiteKey(trimmed)) {
+        window.localStorage.setItem(STORAGE_KEY_TURNSTILE, trimmed);
+      } else {
+        window.localStorage.removeItem(STORAGE_KEY_TURNSTILE);
+      }
     } catch (err) {
       console.warn('Could not save Turnstile key to localStorage', err);
     }

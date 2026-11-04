@@ -151,12 +151,20 @@ export const BookingForm: React.FC<BookingFormProps> = ({
           },
           'error-callback': (errorCode?: string | number) => {
             if (isCancelled) return true;
-            console.warn('Turnstile error-callback encountered:', errorCode);
+            const codeStr = String(errorCode || 'necunoscută');
+            console.warn('Turnstile error-callback encountered:', codeStr);
             setTurnstileToken('');
             setTurnstileStatus('error');
-            setTurnstileErrorDetail(
-              `Eroare verificare securitate (${errorCode || 'necunoscută'}). Asigurați-vă că domeniul este adăugat în Cloudflare.`
-            );
+            if (codeStr === '110200') {
+              const currentHost = typeof window !== 'undefined' ? window.location.hostname : '';
+              setTurnstileErrorDetail(
+                `Domeniul curent (${currentHost}) nu este în lista Hostname Management din Cloudflare (widgetul este autorizat pentru roxanateusdepfa.netlify.app).`
+              );
+            } else {
+              setTurnstileErrorDetail(
+                `Eroare verificare securitate (${codeStr}). Asigurați-vă că domeniul roxanateusdepfa.netlify.app este autorizat în Cloudflare.`
+              );
+            }
             return true;
           },
         });

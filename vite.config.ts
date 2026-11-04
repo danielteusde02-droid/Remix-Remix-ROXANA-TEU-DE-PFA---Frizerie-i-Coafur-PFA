@@ -246,9 +246,28 @@ function apiServerPlugin(): Plugin {
   };
 }
 
+const ACTIVE_TURNSTILE_SITE_KEY = '0x4AAAAAAFy_iG_g6jNTFe-I';
+const DEPRECATED_SITE_KEYS = new Set([
+  '0x4AAAAAAFwOexYPqmzq_p4n',
+  '0x4AAAAAAAFxuvMnfQmIDu7nE',
+  '0x4AAAAAAFxuvMnfQmIDu7nE',
+]);
+
+if (
+  !process.env.VITE_TURNSTILE_SITE_KEY ||
+  DEPRECATED_SITE_KEYS.has(process.env.VITE_TURNSTILE_SITE_KEY.trim())
+) {
+  process.env.VITE_TURNSTILE_SITE_KEY = ACTIVE_TURNSTILE_SITE_KEY;
+}
+
 export default defineConfig(() => {
   return {
     base: './',
+    define: {
+      'import.meta.env.VITE_TURNSTILE_SITE_KEY': JSON.stringify(
+        process.env.VITE_TURNSTILE_SITE_KEY || ACTIVE_TURNSTILE_SITE_KEY
+      ),
+    },
     plugins: [react(), tailwindcss(), apiServerPlugin()],
     resolve: {
       alias: {
