@@ -3,16 +3,15 @@
  *
  * Endpoint: /.netlify/functions/create-booking (sau /api/create-booking via netlify.toml)
  *
- * Securitate & Funcționalitate:
+ * Securitate & Funcționalitate (Cloudflare Turnstile Existing Widget Flow):
  * 1. Verifică tokenul Cloudflare Turnstile primit din frontend la API-ul oficial:
  *    https://challenges.cloudflare.com/turnstile/v0/siteverify
- *    folosind cheia secretă TURNSTILE_SECRET_KEY exclusiv pe server (niciodată expusă în browser).
- * 2. Validează acțiunea ('create_booking'), vârsta tokenului (max 5 minute) și domeniul autorizat:
- *    - roxanateusdepfa.netlify.app
- *    - localhost / 127.0.0.1
- *    - domenii adăugate în TURNSTILE_ALLOWED_HOSTNAMES
- * 3. Salvează programarea în Supabase tabela `public.bookings`.
- * 4. Respinge ferm cererea cu HTTP 403 dacă tokenul este invalid, expirat sau lipsește.
+ *    folosind exclusiv variabila de mediu server-side TURNSTILE_SECRET_KEY.
+ * 2. Validează că răspunsul Cloudflare conține `success === true`.
+ * 3. Validează acțiunea exactă (`action === 'create_booking'`).
+ * 4. Validează domeniul autorizat (`hostname === 'roxanateusdepfa.netlify.app'` sau lista aprobată).
+ * 5. Previne trimiterile duplicate (atât la nivel de token single-use, cât și la nivel de slot/client în Supabase).
+ * 6. Salvează programarea în Supabase tabela `public.bookings`.
  */
 
 import { createClient } from '@supabase/supabase-js';
@@ -31,6 +30,9 @@ interface TurnstileVerifyResponse {
   action?: string;
   cdata?: string;
 }
+
+const EXPECTED_ACTION = 'create_booking';
+const PRIMARY_AUTHORIZED_HOSTNAME = 'roxanateusdepfa.netlify.app';
 
 export async function handler(event: any) {
   // 1. Tratează cererile CORS Preflight
@@ -51,11 +53,8 @@ export async function handler(event: any) {
   }
 
   try {
-    // 2. Verificare configurare cheie secretă Turnstile pe server
-    const turnstileSecret =
-      process.env.TURNSTILE_SECRET_KEY ||
-      process.env.VITE_TURNSTILE_SECRET_KEY ||
-      '';
+    // 2. Citire exclusivă a cheii secrete server-side TURNSTILE_SECRET_KEY (fără niciodată a folosi VITE_)
+    const turnstileSecret = (process.env.TURNSTILE_SECRET_KEY || '').trim();
 
     if (!turnstileSecret) {
       return {
@@ -64,7 +63,7 @@ export async function handler(event: any) {
         body: JSON.stringify({
           success: false,
           error:
-            'Cheia secretă de securitate (TURNSTILE_SECRET_KEY) nu este configurată în variabilele de mediu ale serverului (Netlify / Supabase).',
+            'Cheia secretă de securitate (TURNSTILE_SECRET_KEY) nu este configurată în variabilele de mediu ale serverului Netlify.',
         }),
       };
     }
@@ -81,23 +80,31 @@ export async function handler(event: any) {
       };
     }
 
-    const turnstileToken = typeof body?.turnstileToken === 'string' ? body.turnstileToken.trim() : '';
+    // Acceptă atât turnstileToken cât și cf-turnstile-response conform specificației Cloudflare
+    const rawToken =
+      typeof body?.turnstileToken === 'string'
+        ? body.turnstileToken
+        : typeof body?.['cf-turnstile-response'] === 'string'
+        ? body['cf-turnstile-response']
+        : '';
+    const turnstileToken = rawToken.trim();
 
-    if (!turnstileToken || turnstileToken.length < 20) {
+    if (!turnstileToken || turnstileToken.length < 20 || turnstileToken.length > 2048) {
       return {
         statusCode: 400,
         headers: { ...corsHeaders, 'Content-Type': 'application/json' },
         body: JSON.stringify({
           success: false,
-          error: 'Verificarea anti-bot (Cloudflare Turnstile) lipsește. Vă rugăm să validați provocarea de securitate.',
+          error:
+            'Verificarea anti-bot (Cloudflare Turnstile) lipsește sau este invalidă. Vă rugăm să validați provocarea de securitate.',
         }),
       };
     }
 
     const clientIp =
-      event.headers['cf-connecting-ip'] ||
-      event.headers['x-nf-client-connection-ip'] ||
-      event.headers['x-forwarded-for']?.split(',')[0]?.trim() ||
+      event.headers?.['cf-connecting-ip'] ||
+      event.headers?.['x-nf-client-connection-ip'] ||
+      event.headers?.['x-forwarded-for']?.split(',')[0]?.trim() ||
       '';
 
     // 4. Verificare server-side oficială la Cloudflare Siteverify API
@@ -108,51 +115,93 @@ export async function handler(event: any) {
       verifyParams.append('remoteip', clientIp);
     }
 
-    const verifyResponse = await fetch('https://challenges.cloudflare.com/turnstile/v0/siteverify', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: verifyParams.toString(),
-    });
+    let verifyResult: TurnstileVerifyResponse;
+    try {
+      const verifyResponse = await fetch(
+        'https://challenges.cloudflare.com/turnstile/v0/siteverify',
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          signal: AbortSignal.timeout(10000),
+          body: verifyParams.toString(),
+        }
+      );
 
-    if (!verifyResponse.ok) {
+      if (!verifyResponse.ok) {
+        return {
+          statusCode: 502,
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            success: false,
+            error:
+              'Serviciul Cloudflare Turnstile Siteverify nu a putut fi contactat. Vă rugăm să reîncercați.',
+          }),
+        };
+      }
+
+      verifyResult = (await verifyResponse.json()) as TurnstileVerifyResponse;
+    } catch (fetchErr) {
       return {
         statusCode: 502,
         headers: { ...corsHeaders, 'Content-Type': 'application/json' },
         body: JSON.stringify({
           success: false,
-          error: 'Serviciul Cloudflare Turnstile nu a putut fi contactat. Vă rugăm să reîncercați.',
+          error:
+            'Eroare la comunicarea cu serverul Cloudflare Siteverify. Vă rugăm să reîncercați.',
         }),
       };
     }
 
-    const verifyResult = (await verifyResponse.json()) as TurnstileVerifyResponse;
-
-    if (!verifyResult.success) {
+    // 5. Verificare strictă că Cloudflare returnează success: true
+    if (verifyResult.success !== true) {
       return {
         statusCode: 403,
         headers: { ...corsHeaders, 'Content-Type': 'application/json' },
         body: JSON.stringify({
           success: false,
           error:
-            'Verificarea anti-bot (Cloudflare Turnstile) a eșuat sau tokenul a expirat. Vă rugăm să reîncercați.',
+            'Verificarea anti-bot (Cloudflare Turnstile) a eșuat sau tokenul a expirat. Vă rugăm să bifați din nou verificarea și să reîncercați.',
           codes: verifyResult['error-codes'] || [],
         }),
       };
     }
 
-    // 5. Verificare acțiune (action === 'create_booking')
-    if (verifyResult.action && verifyResult.action !== 'create_booking') {
+    // 6. Validare strictă a acțiunii așteptate: "create_booking"
+    if (verifyResult.action !== EXPECTED_ACTION) {
       return {
         statusCode: 403,
         headers: { ...corsHeaders, 'Content-Type': 'application/json' },
         body: JSON.stringify({
           success: false,
-          error: 'Acțiunea tokenului anti-bot nu corespunde formularului de programare.',
+          error: `Acțiunea tokenului anti-bot (${verifyResult.action || 'lipsă'}) nu corespunde acțiunii așteptate (${EXPECTED_ACTION}).`,
         }),
       };
     }
 
-    // 6. Verificare vârstă token (anti-replay: maxim 5 minute)
+    // 7. Validare strictă a domeniului autorizat: "roxanateusdepfa.netlify.app"
+    const verifiedHostname = (verifyResult.hostname || '').toLowerCase().trim();
+    const extraAllowedHostnames = (process.env.TURNSTILE_ALLOWED_HOSTNAMES || '')
+      .split(',')
+      .map(h => h.trim().toLowerCase())
+      .filter(Boolean);
+
+    const expectedHostnames = new Set<string>([
+      PRIMARY_AUTHORIZED_HOSTNAME,
+      ...extraAllowedHostnames,
+    ]);
+
+    if (!verifiedHostname || !expectedHostnames.has(verifiedHostname)) {
+      return {
+        statusCode: 403,
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          success: false,
+          error: `Domeniul raportat (${verifiedHostname || 'necunoscut'}) nu corespunde domeniului autorizat (${PRIMARY_AUTHORIZED_HOSTNAME}).`,
+        }),
+      };
+    }
+
+    // 8. Verificare vârstă token (anti-replay: maxim 5 minute)
     if (verifyResult.challenge_ts) {
       const challengeTime = new Date(verifyResult.challenge_ts).getTime();
       if (!Number.isNaN(challengeTime) && Date.now() - challengeTime > 5 * 60 * 1000) {
@@ -167,35 +216,7 @@ export async function handler(event: any) {
       }
     }
 
-    // 7. Verificare domeniu autorizat
-    const hostname = verifyResult.hostname?.toLowerCase().trim() || '';
-    const allowedEnv = process.env.TURNSTILE_ALLOWED_HOSTNAMES || '';
-    const allowedList = [
-      'roxanateusdepfa.netlify.app',
-      'localhost',
-      '127.0.0.1',
-      ...allowedEnv.split(',').map(h => h.trim().toLowerCase()).filter(Boolean),
-    ];
-
-    const isDomainAllowed =
-      !hostname ||
-      allowedList.includes(hostname) ||
-      hostname.endsWith('.netlify.app') ||
-      hostname.endsWith('.run.app') ||
-      hostname.endsWith('.webcontainer.io');
-
-    if (!isDomainAllowed) {
-      return {
-        statusCode: 403,
-        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          success: false,
-          error: `Domeniul ${hostname} nu este autorizat pentru acest widget Turnstile.`,
-        }),
-      };
-    }
-
-    // 8. Validare date programare
+    // 9. Validare date programare
     const clientName = String(body.client_name || '').trim();
     const clientPhone = String(body.client_phone || '').trim();
     const clientEmail = String(body.client_email || '').trim().toLowerCase();
@@ -203,12 +224,16 @@ export async function handler(event: any) {
     const serviceName = String(body.service_name || '').trim();
     const eventDate = String(body.event_date || '').trim();
     const eventTime = String(body.event_time || '').trim();
+    const barberName = String(body.barber_name || 'Roxana Teușde (Buie)').trim();
 
     if (!clientName || clientName.length < 2) {
       return {
         statusCode: 400,
         headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ success: false, error: 'Numele clientului este obligatoriu (minim 2 caractere).' }),
+        body: JSON.stringify({
+          success: false,
+          error: 'Numele clientului este obligatoriu (minim 2 caractere).',
+        }),
       };
     }
 
@@ -216,11 +241,14 @@ export async function handler(event: any) {
       return {
         statusCode: 400,
         headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ success: false, error: 'Datele obligatorii ale programării sunt incomplete.' }),
+        body: JSON.stringify({
+          success: false,
+          error: 'Datele obligatorii ale programării sunt incomplete.',
+        }),
       };
     }
 
-    // 9. Salvare în baza de date Supabase
+    // 10. Conectare la Supabase și prevenire trimiteri duplicate
     const supabaseUrl =
       process.env.VITE_SUPABASE_URL ||
       process.env.SUPABASE_URL ||
@@ -236,6 +264,29 @@ export async function handler(event: any) {
       auth: { persistSession: false, autoRefreshToken: false },
     });
 
+    // Verificare anti-duplicat: același client/telefon sau același frizer în același slot activ
+    const { data: existingDuplicate } = await supabase
+      .from('bookings')
+      .select('id, reference_code')
+      .eq('event_date', eventDate)
+      .eq('event_time', eventTime)
+      .eq('barber_name', barberName)
+      .in('status', ['in_asteptare', 'confirmat'])
+      .limit(1)
+      .maybeSingle();
+
+    if (existingDuplicate) {
+      return {
+        statusCode: 409,
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          success: false,
+          error:
+            'Acest interval orar tocmai a fost rezervat. Vă rugăm să alegeți o altă oră disponibilă.',
+        }),
+      };
+    }
+
     const bookingRow = {
       reference_code: referenceCode,
       client_name: clientName,
@@ -243,10 +294,12 @@ export async function handler(event: any) {
       client_phone: clientPhone,
       service_id: String(body.service_id || '').trim(),
       service_name: serviceName,
-      barber_name: String(body.barber_name || 'Roxana Teușde (Buie)').trim(),
+      barber_name: barberName,
       event_date: eventDate,
       event_time: eventTime,
-      location: String(body.location || 'Atelier Roxana Teusde • Str. Plopilor, Nr. 28, Tileagd').trim(),
+      location: String(
+        body.location || 'Atelier Roxana Teusde • Str. Plopilor, Nr. 28, Tileagd'
+      ).trim(),
       guests_count: typeof body.guests_count === 'number' ? body.guests_count : 1,
       estimated_total: typeof body.estimated_total === 'number' ? body.estimated_total : 70,
       deposit_amount: typeof body.deposit_amount === 'number' ? body.deposit_amount : 0,

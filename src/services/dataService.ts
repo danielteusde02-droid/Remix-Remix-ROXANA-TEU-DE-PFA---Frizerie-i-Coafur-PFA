@@ -776,6 +776,25 @@ export const dataService = {
       );
     }
 
+    const isInit = getLocalItem<boolean>(STORAGE_BOOKINGS_INIT, false);
+    const current = getLocalItem<Booking[]>(STORAGE_BOOKINGS, isInit ? [] : INITIAL_BOOKINGS);
+
+    // Prevenire trimiteri duplicate pentru același interval, dată și frizer
+    const targetBarber = bookingInput.barberName || 'Roxana Teușde (Buie)';
+    const duplicateLocal = current.find(
+      b =>
+        b.eventDate === bookingInput.eventDate &&
+        b.eventTime === bookingInput.eventTime &&
+        (b.barberName || 'Roxana Teușde (Buie)') === targetBarber &&
+        (b.status === 'in_asteptare' || b.status === 'confirmat')
+    );
+
+    if (duplicateLocal) {
+      throw new Error(
+        'Acest interval orar este deja ocupat sau programarea a fost deja trimisă. Vă rugăm să alegeți o altă oră disponibilă.'
+      );
+    }
+
     const newBooking: Booking = {
       ...bookingInput,
       id: typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : `book-${Date.now()}`,
@@ -792,7 +811,7 @@ export const dataService = {
       client_phone: newBooking.clientPhone,
       service_id: newBooking.serviceId,
       service_name: newBooking.serviceName,
-      barber_name: newBooking.barberName || 'Roxana Teușde (Buie)',
+      barber_name: targetBarber,
       event_date: newBooking.eventDate,
       event_time: newBooking.eventTime,
       location: newBooking.location,
@@ -805,14 +824,14 @@ export const dataService = {
       admin_notes: '',
     };
 
-    // 1. Apel către backend (/api/create-booking sau /.netlify/functions/create-booking)
+    // 1. Apel către funcția Netlify (/.netlify/functions/create-booking / /api/create-booking)
     // Serverul verifică tokenul cu secretul TURNSTILE_SECRET_KEY direct la Cloudflare Siteverify API
     let apiSuccess = false;
     try {
       const apiUrl =
         typeof window !== 'undefined' && window.location
-          ? '/api/create-booking'
-          : 'http://localhost:3000/api/create-booking';
+          ? '/.netlify/functions/create-booking'
+          : 'http://localhost:3000/.netlify/functions/create-booking';
 
       const apiRes = await fetch(apiUrl, {
         method: 'POST',
@@ -820,6 +839,7 @@ export const dataService = {
         body: JSON.stringify({
           ...dbRow,
           turnstileToken: cleanToken,
+          'cf-turnstile-response': cleanToken,
         }),
       });
 
@@ -834,8 +854,8 @@ export const dataService = {
           }
         }
         apiSuccess = true;
-      } else if (apiRes.status === 403 || apiRes.status === 400) {
-        // Respingere explicită Turnstile (token invalid, expirat, duplicate, acțiune eronată)
+      } else if (apiRes.status === 403 || apiRes.status === 400 || apiRes.status === 409) {
+        // Respingere explicită Turnstile (token invalid, expirat, acțiune/domeniu eronat) sau duplicat (409)
         const errorMessage =
           apiJson?.error || 'Verificarea anti-bot Cloudflare Turnstile a eșuat. Vă rugăm să reîncercați.';
         throw new Error(errorMessage);
@@ -848,7 +868,7 @@ export const dataService = {
       }
     }
 
-    // 2. Dacă /api/create-booking a returnat 404 (endpoint nedisponibil local), încercăm Supabase Edge Function
+    // 2. Dacă /.netlify/functions/create-booking a returnat 404, încercăm Supabase Edge Function (care face de asemenea Siteverify)
     if (!apiSuccess) {
       const supabase = getSupabase();
       if (supabase) {
@@ -859,6 +879,7 @@ export const dataService = {
               body: {
                 ...dbRow,
                 turnstileToken: cleanToken,
+                'cf-turnstile-response': cleanToken,
               },
             }
           );
@@ -886,12 +907,10 @@ export const dataService = {
 
     if (!apiSuccess) {
       throw new Error(
-        'Serverul de validare a programărilor nu a putut fi contactat. Asigurați-vă că variabilele de mediu sunt configurate pe server (Netlify sau Supabase).'
+        'Serverul de validare Cloudflare Siteverify nu a putut fi contactat. Asigurați-vă că funcția Netlify și variabila TURNSTILE_SECRET_KEY sunt active.'
       );
     }
 
-    const isInit = getLocalItem<boolean>(STORAGE_BOOKINGS_INIT, false);
-    const current = getLocalItem<Booking[]>(STORAGE_BOOKINGS, isInit ? [] : INITIAL_BOOKINGS);
     setLocalItem(STORAGE_BOOKINGS, [newBooking, ...current]);
     setLocalItem(STORAGE_BOOKINGS_INIT, true);
     return newBooking;

@@ -58,8 +58,9 @@ export const BookingForm: React.FC<BookingFormProps> = ({
 
   const turnstileContainerRef = useRef<HTMLDivElement | null>(null);
   const turnstileWidgetIdRef = useRef<string | null>(null);
+  const submitLockRef = useRef<boolean>(false);
 
-  const turnstileSiteKey = getTurnstileSiteKey().trim();
+  const turnstileSiteKey = (getTurnstileSiteKey() || '0x4AAAAAAFy_iG_g6jNTFe-I').trim();
 
   const schedulableServices = services.filter(
     s => s.category !== 'produse' && (s.durationMin === undefined || s.durationMin > 0)
@@ -82,11 +83,11 @@ export const BookingForm: React.FC<BookingFormProps> = ({
   }, [preselectedAddons]);
 
   const resetTurnstileWidget = useCallback(() => {
+    setTurnstileToken('');
     const win = window as any;
     if (win.turnstile && turnstileWidgetIdRef.current !== null) {
       try {
         win.turnstile.reset(turnstileWidgetIdRef.current);
-        setTurnstileToken('');
         setTurnstileStatus('ready');
         setTurnstileErrorDetail('');
       } catch (err) {

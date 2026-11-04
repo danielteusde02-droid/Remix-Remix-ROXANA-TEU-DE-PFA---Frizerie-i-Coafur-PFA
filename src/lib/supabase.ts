@@ -5,6 +5,7 @@ import { isValidSupabaseKey, isValidSupabaseUrl } from '../utils/securityUtils';
 const STORAGE_KEY_URL = 'roxana_teusde_supabase_url';
 const STORAGE_KEY_ANON = 'roxana_teusde_supabase_anon_key';
 export const STORAGE_KEY_TURNSTILE = 'roxana_teusde_turnstile_site_key';
+export const DEFAULT_TURNSTILE_SITE_KEY = '0x4AAAAAAFy_iG_g6jNTFe-I';
 
 export const SUPABASE_STORAGE_BUCKET = 'atelier-media';
 export const MAX_MEDIA_FILE_SIZE_BYTES = 52428800; // 50 MB
@@ -42,7 +43,7 @@ export function normalizeSupabaseUrl(rawUrl: string): string {
 
 /**
  * Returns the Cloudflare Turnstile public site key, prioritizing environment variables,
- * then localStorage (configured via AdminModal). Returns empty string if not configured.
+ * then localStorage (configured via AdminModal), falling back to the existing widget Site Key.
  */
 export function getTurnstileSiteKey(): string {
   const envKey =
@@ -61,7 +62,7 @@ export function getTurnstileSiteKey(): string {
     }
   }
 
-  return envKey || storedKey || '';
+  return envKey || storedKey || DEFAULT_TURNSTILE_SITE_KEY;
 }
 
 /**
